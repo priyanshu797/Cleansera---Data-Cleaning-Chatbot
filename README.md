@@ -1,5 +1,5 @@
-🧹 Data Cleaning Chatbot
-🧭 Project Overview
+Data Cleaning Chatbot
+Project Overview
 
 Data Cleaning Chatbot is an intelligent, Flask-based web application designed to automate and simplify the process of cleaning and preprocessing datasets.
 It acts as an AI-powered data assistant, allowing users to upload raw CSV files, explore dataset columns, clean data interactively, and download the refined version — all through an intuitive chat-style interface.
@@ -8,25 +8,25 @@ This project brings together data engineering, AI, and UI automation principles 
 
 ✨ Features
 
-📂 File Upload Support – Upload raw CSV datasets directly from your computer.
+File Upload Support – Upload raw CSV datasets directly from your computer.
 
-🧮 Data Column Overview – Automatically lists column names and basic info.
+Data Column Overview – Automatically lists column names and basic info.
 
-🧹 Data Cleaning Options – Detect and handle missing values, duplicates, or invalid data.
+Data Cleaning Options – Detect and handle missing values, duplicates, or invalid data.
 
-↩️ Undo Action – Revert the most recent cleaning step.
+Undo Action – Revert the most recent cleaning step.
 
-💾 Download Cleaned File – Export cleaned datasets as CSV files.
+Download Cleaned File – Export cleaned datasets as CSV files.
 
-💬 AI Chat Interface – Interact with the assistant to request cleaning tasks.
+AI Chat Interface – Interact with the assistant to request cleaning tasks.
 
-🧠 Gemini AI Integration – Backend logic powered by Gemini for contextual data understanding.
+Gemini AI Integration – Backend logic powered by Gemini for contextual data understanding.
 
-🪄 Smart Logging – Track every cleaning action for transparency.
+Smart Logging – Track every cleaning action for transparency.
 
-🧱 Responsive UI – Built with HTML, CSS, and JavaScript (no React) for fast and lightweight interaction.
+Responsive UI – Built with HTML, CSS, and JavaScript (no React) for fast and lightweight interaction.
 
-🧠 Tech Stack
+Tech Stack
 Component	Technology
 Backend Framework	Flask (Python)
 Frontend	HTML, CSS, JavaScript
@@ -36,7 +36,7 @@ Data Storage	Local temporary storage (uploads/, processed/)
 Runtime Environment	Python 3.9+
 Deployment Ready	Docker-compatible & Render-ready
 
-🧱 Project Structure
+Project Structure
 Data-Cleaning-Chatbot/
 │
 ├── app.py
