@@ -25,7 +25,7 @@ os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 os.makedirs("cleaned", exist_ok=True)
 
 
-GEMINI_API_KEY = "your api key here"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Configure Gemini model
 if HAS_GEMINI and GEMINI_API_KEY:
@@ -513,5 +513,6 @@ if __name__ == "__main__":
     print("🌐 Open http://localhost:5000")
     print("📊 Features: Pagination, Server-side Search, AI-powered cleaning")
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+
 
 
