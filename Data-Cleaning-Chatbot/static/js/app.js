@@ -1,4 +1,7 @@
-const API_URL = 'http://localhost:5000/api';
+const API_URL =
+  window.location.hostname === "localhost"
+    ? "http://localhost:5000/api"
+    : `${window.location.origin}/api`;
 let sessionId = null;
 let isProcessing = false;
 let backendOnline = false;
@@ -651,3 +654,4 @@ window.addEventListener('error', (e) => {
 window.addEventListener('unhandledrejection', (e) => {
     console.error('Unhandled promise rejection:', e.reason);
 });
+
