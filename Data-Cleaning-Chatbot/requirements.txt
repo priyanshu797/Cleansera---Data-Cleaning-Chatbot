@@ -1,0 +1,7 @@
+Flask
+Flask-Cors
+pandas
+numpy
+plotly
+gunicorn
+openpyxl
