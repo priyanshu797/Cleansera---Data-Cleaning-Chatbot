@@ -512,4 +512,6 @@ if __name__ == "__main__":
     print("🚀 Cleansera AI Backend running...")
     print("🌐 Open http://localhost:5000")
     print("📊 Features: Pagination, Server-side Search, AI-powered cleaning")
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+
+
