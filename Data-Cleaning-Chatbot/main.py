@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify, request,send_file
+from flask import Flask, render_template, jsonify, request, send_file
 from flask_cors import CORS
 import pandas as pd
 import numpy as np
@@ -6,44 +6,68 @@ import os, json, re, time, uuid, math
 from io import BytesIO
 import plotly.express as px
 import plotly.graph_objects as go
+from datetime import datetime
+from groq import Groq
 import os
-import sys
-
-# Optional: Google Gemini. If not available, endpoints still work.
-try:
-    import google.generativeai as genai
-    HAS_GEMINI = True
-except Exception:
-    HAS_GEMINI = False
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '.')))
+from dotenv import load_dotenv
 app = Flask(__name__)
 CORS(app)
+
+load_dotenv()
 
 app.config["UPLOAD_FOLDER"] = "uploads"
 os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 os.makedirs("cleaned", exist_ok=True)
 
+# Groq API Configuration
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# Initialize Groq client
+try:
+    client = Groq(api_key=GROQ_API_KEY)
+    HAS_GROQ = True
+except Exception:
+    client = None
+    HAS_GROQ = False
 
-# Configure Gemini model
-if HAS_GEMINI and GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-2.5-flash")
-else:
-    model = None
-
-
+# Sessions now include conversation history
 sessions = {}
 
+def call_groq_api(prompt, conversation_history=None):
+    """Call Groq API with conversation history support."""
+    if not client:
+        raise Exception("Groq client not configured")
+    
+    messages = []
+    
+    # Add conversation history if provided
+    if conversation_history:
+        for msg in conversation_history[-6:]:  # Last 6 messages for context
+            messages.append({
+                "role": msg["role"],
+                "content": msg["content"]
+            })
+    
+    # Add current prompt
+    messages.append({
+        "role": "user",
+        "content": prompt
+    })
+    
+    try:
+        chat_completion = client.chat.completions.create(
+            messages=messages,
+            model=GROQ_MODEL,
+            temperature=0.7,
+            max_tokens=2000
+        )
+        return chat_completion.choices[0].message.content
+    except Exception as e:
+        raise Exception(f"Groq API call failed: {str(e)}")
 
 def safe_to_records(df: pd.DataFrame, limit=None, page=0):
-    """
-    Convert DataFrame to JSON-serializable list-of-dicts.
-    If limit is None => return all rows.
-    Pagination: page is 0-indexed.
-    """
+    """Convert DataFrame to JSON-serializable list-of-dicts with pagination."""
     if limit is None:
         txt = df.to_json(orient="records", date_format="iso")
         return json.loads(txt)
@@ -55,50 +79,71 @@ def safe_to_records(df: pd.DataFrame, limit=None, page=0):
         return json.loads(txt)
 
 def get_data_profile(df: pd.DataFrame):
-    """Return columns, dtype mapping and missing counts."""
-    return {
+    """Return comprehensive data profile."""
+    profile = {
         "columns": df.columns.tolist(),
         "dtypes": {col: str(df[col].dtype) for col in df.columns},
         "missing_values": {col: int(df[col].isna().sum()) for col in df.columns},
-        "rows": int(len(df))
+        "rows": int(len(df)),
+        "numeric_columns": df.select_dtypes(include=[np.number]).columns.tolist(),
+        "categorical_columns": df.select_dtypes(include=['object', 'category']).columns.tolist(),
+        "datetime_columns": df.select_dtypes(include=['datetime64']).columns.tolist()
     }
+    return profile
 
 def analyze_with_ai(profile: dict):
-    """Ask Gemini to summarize dataset. If Gemini not available, return a fallback message."""
-    if not model:
-        return "AI analysis is unavailable (Gemini not configured). The profile: " + json.dumps(profile, indent=2)
-    prompt = f"""You are a professional data analyst. Summarize this dataset profile and suggest cleaning steps, quick visuals to run, and which columns may be numeric/datetime/categorical.
-Profile:
+    """Ask Groq to analyze dataset with enhanced context."""
+    if not client:
+        return json.dumps({
+            "summary": "AI analysis unavailable (Groq not configured)",
+            "suggestions": ["Upload data to see basic statistics"],
+            "recommended_plots": []
+        })
+    
+    prompt = f"""You are a professional data analyst. Analyze this dataset and provide actionable insights.
+
+Dataset Profile:
 {json.dumps(profile, indent=2)}
-Provide a JSON output with keys: suggestions (list), recommended_plots (list of objects like {{type:'bar', x:'col', y:'col'}}), and summary (string).
-Return strictly JSON only.
-"""
+
+Provide a JSON response with:
+1. "summary": Brief overview of the dataset
+2. "suggestions": List of 3-5 data cleaning/analysis recommendations
+3. "recommended_plots": List of visualization suggestions with format:
+   [{{"type": "bar", "x": "column1", "y": "column2", "title": "Description"}}, ...]
+
+Supported plot types: bar, pie, histogram, line, scatter, bubble, box, heatmap
+
+Return ONLY valid JSON, no markdown formatting."""
+
     try:
-        res = model.generate_content(prompt)
-        # res.text may contain extra text — try to extract JSON
-        return res.text
+        text = call_groq_api(prompt)
+        # Clean markdown formatting
+        text = text.replace("```json", "").replace("```", "").strip()
+        return text
     except Exception as e:
-        return f"⚠️ AI analysis failed: {e}"
+        return json.dumps({
+            "summary": f"AI analysis error: {e}",
+            "suggestions": [],
+            "recommended_plots": []
+        })
 
 def parse_json_response(text):
-    """Try to salvage JSON-like responses from model (basic)."""
+    """Parse JSON from AI response with robust error handling."""
     if not text:
-        return {"type": "message", "content": ""}
+        return {"type": "message", "content": "No response"}
+    
     txt = text.strip()
-    # remove triple backticks blocks
-    txt = txt.replace("```json", "").replace("```", "")
-    # if it's valid JSON already, parse
+    txt = txt.replace("```json", "").replace("```", "").strip()
+    
     try:
         return json.loads(txt)
     except Exception:
-        # attempt naive fix: convert unquoted keys to quoted (very simple)
+        # Try to fix common JSON issues
         try:
-            fixed = re.sub(r'(\b\w+\b)\s*:', r'"\1":', txt)
+            fixed = re.sub(r'(\w+):', r'"\1":', txt)
             return json.loads(fixed)
         except Exception:
-            # fallback: return as message
             return {"type": "message", "content": txt}
-
 
 @app.route('/')
 def home():
@@ -110,16 +155,23 @@ def index():
 
 @app.route("/api/health")
 def health():
-    return jsonify({"status": "ok", "model": ("gemini-2.5-flash" if model else "none")})
-
+    api_status = "configured" if HAS_GROQ and client else "not_configured"
+    return jsonify({
+        "status": "ok", 
+        "model": GROQ_MODEL,
+        "api_status": api_status,
+        "features": ["pagination", "search", "all_visualizations", "conversation_memory"]
+    })
 
 @app.route("/api/upload", methods=["POST"])
 def upload():
     if "file" not in request.files:
         return jsonify({"success": False, "error": "No file uploaded"})
+    
     file = request.files["file"]
     if file.filename == "":
         return jsonify({"success": False, "error": "Empty filename"})
+    
     session_id = str(uuid.uuid4())
     file_path = os.path.join(app.config["UPLOAD_FOLDER"], file.filename)
     file.save(file_path)
@@ -128,26 +180,28 @@ def upload():
         if file.filename.lower().endswith(".csv"):
             df = pd.read_csv(file_path, encoding="utf-8-sig")
         else:
-            # supports xlsx, xls
             df = pd.read_excel(file_path)
     except Exception as e:
         return jsonify({"success": False, "error": f"Failed reading file: {e}"})
 
-    # convert some common date-looking columns to datetime if possible (safe attempt)
+    # Auto-detect and convert datetime columns
     for col in df.columns:
         if df[col].dtype == object:
             sample = df[col].dropna().astype(str).head(10).tolist()
-            # heuristics
             if any(re.search(r'\d{1,4}[-/]\d{1,2}[-/]\d{1,4}', s) for s in sample):
                 try:
-                    df[col] = pd.to_datetime(df[col], errors="ignore", dayfirst=True)
+                    df[col] = pd.to_datetime(df[col], errors="ignore")
                 except Exception:
                     pass
 
-    sessions[session_id] = [df.copy()]
+    # Initialize session with dataframe history and conversation history
+    sessions[session_id] = {
+        "dataframes": [df.copy()],
+        "conversation": [],
+        "filename": file.filename
+    }
 
     profile = get_data_profile(df)
-    # return first page default (limit 100)
     preview = safe_to_records(df, limit=100, page=0)
     ai_analysis = analyze_with_ai(profile)
 
@@ -160,17 +214,9 @@ def upload():
         "total_rows": len(df)
     })
 
-
 @app.route("/api/get_page", methods=["POST"])
 def get_page():
-    """
-    Server-side pagination endpoint.
-    POST body:
-      session_id (required)
-      page (required, 1-indexed)
-      rows_per_page (required)
-      search_query (optional, empty string means no search)
-    """
+    """Server-side pagination with search support."""
     data = request.get_json() or {}
     session_id = data.get("session_id")
     page = data.get("page", 1)
@@ -180,12 +226,13 @@ def get_page():
     if not session_id or session_id not in sessions:
         return jsonify({"success": False, "error": "Invalid session_id"}), 400
     
-    df = sessions[session_id][-1]
+    df = sessions[session_id]["dataframes"][-1]
     
-    # Apply search filter if provided (frontend filtering backup)
     if search_query:
-        # Simple case-insensitive search across all columns
-        mask = df.astype(str).apply(lambda row: row.str.contains(search_query, case=False, na=False).any(), axis=1)
+        mask = df.astype(str).apply(
+            lambda row: row.str.contains(search_query, case=False, na=False).any(), 
+            axis=1
+        )
         filtered_df = df[mask]
     else:
         filtered_df = df
@@ -193,7 +240,6 @@ def get_page():
     total_rows = len(filtered_df)
     total_pages = math.ceil(total_rows / rows_per_page) if total_rows > 0 else 1
     
-    # Convert to 0-indexed for slicing
     page_idx = page - 1
     start = page_idx * rows_per_page
     end = start + rows_per_page
@@ -210,22 +256,9 @@ def get_page():
         "rows_per_page": rows_per_page
     })
 
-
 @app.route("/api/search", methods=["POST"])
 def search():
-    """
-    Server-side search endpoint for efficient searching through large datasets.
-    POST body:
-      session_id (required)
-      query (required) - search term or column:value format
-      page (optional, default 1)
-      rows_per_page (optional, default 50)
-    
-    Search formats:
-      - "keyword" - searches across all columns
-      - "column:value" - searches specific column for value
-      - "column1:value1 column2:value2" - multiple column filters
-    """
+    """Enhanced server-side search with column-specific filtering."""
     data = request.get_json() or {}
     session_id = data.get("session_id")
     query = data.get("query", "").strip()
@@ -238,36 +271,26 @@ def search():
     if not query:
         return jsonify({"success": False, "error": "Empty search query"}), 400
     
-    df = sessions[session_id][-1]
+    df = sessions[session_id]["dataframes"][-1]
     
     try:
-        # Parse query for column-specific searches
         column_searches = re.findall(r'(\w+):([^\s]+)', query)
         
         if column_searches:
-            # Column-specific search
             mask = pd.Series([True] * len(df))
-            
             for col_name, search_value in column_searches:
                 if col_name in df.columns:
-                    # Handle different data types
                     col_data = df[col_name]
-                    
                     if pd.api.types.is_numeric_dtype(col_data):
-                        # Try numeric comparison
                         try:
                             numeric_val = float(search_value)
                             mask &= (col_data == numeric_val)
                         except ValueError:
-                            # If conversion fails, do string search
                             mask &= col_data.astype(str).str.contains(search_value, case=False, na=False)
                     else:
-                        # String search (case-insensitive)
                         mask &= col_data.astype(str).str.contains(search_value, case=False, na=False, regex=False)
-            
             filtered_df = df[mask]
         else:
-            # Global search across all columns
             mask = df.astype(str).apply(
                 lambda row: row.str.contains(query, case=False, na=False, regex=False).any(), 
                 axis=1
@@ -277,7 +300,6 @@ def search():
         total_results = len(filtered_df)
         total_pages = math.ceil(total_results / rows_per_page) if total_results > 0 else 1
         
-        # Paginate results
         page_idx = page - 1
         start = page_idx * rows_per_page
         end = start + rows_per_page
@@ -294,143 +316,106 @@ def search():
             "rows_per_page": rows_per_page,
             "query": query
         })
-        
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": f"Search failed: {str(e)}"
-        }), 500
-
-
-@app.route("/api/preview", methods=["GET"])
-def preview():
-    """
-    GET parameters:
-      session_id (required)
-      limit (optional, integer or 'all')
-      page (optional, 0-indexed integer)
-    """
-    session_id = request.args.get("session_id")
-    if not session_id or session_id not in sessions:
-        return jsonify({"success": False, "error": "Invalid session_id"}), 400
-    df = sessions[session_id][-1]
-    limit = request.args.get("limit", default="100")
-    page = int(request.args.get("page", 0))
-    if limit == "all":
-        rows = safe_to_records(df, limit=None)
-        return jsonify({"success": True, "preview": rows, "rows": int(len(rows))})
-    else:
-        try:
-            limit_i = int(limit)
-            rows = safe_to_records(df, limit=limit_i, page=page)
-            total = len(df)
-            return jsonify({"success": True, "preview": rows, "page": page, "limit": limit_i, "total_rows": total})
-        except Exception as e:
-            return jsonify({"success": False, "error": f"Bad limit param: {e}"}), 400
-
-@app.route("/api/columns", methods=["GET"])
-def columns():
-    session_id = request.args.get("session_id")
-    if not session_id or session_id not in sessions:
-        return jsonify({"success": False, "error": "Invalid session_id"}), 400
-    df = sessions[session_id][-1]
-    return jsonify({"success": True, "profile": get_data_profile(df)})
-
+        return jsonify({"success": False, "error": f"Search failed: {str(e)}"}), 500
 
 @app.route("/api/chat", methods=["POST"])
 def chat():
+    """Enhanced chat with conversation memory and all visualization types."""
     data = request.get_json() or {}
     session_id = data.get("session_id")
     message = data.get("message", "")
+    
     if not session_id or session_id not in sessions:
         return jsonify({"error": "Invalid session"}), 400
 
-    df = sessions[session_id][-1].copy()
-    cols = df.columns.tolist()
-    dtypes = {c: str(df[c].dtype) for c in df.columns}
+    df = sessions[session_id]["dataframes"][-1].copy()
+    conversation = sessions[session_id]["conversation"]
+    filename = sessions[session_id].get("filename", "data")
+    
+    # Add user message to conversation history
+    conversation.append({"role": "user", "content": message})
+    
+    profile = get_data_profile(df)
     sample = df.head(5).to_string()
 
-    # construct system prompt for AI
-    system_prompt = f"""
-You are an assistant that returns a single JSON dict describing the action to take.
-You have the DataFrame 'df' with columns: {cols}
-Data types: {dtypes}
-Sample rows:
+    system_prompt = f"""You are an advanced data analysis assistant with conversation memory.
+
+DATASET INFO:
+- Filename: {filename}
+- Columns: {profile['columns']}
+- Numeric columns: {profile['numeric_columns']}
+- Categorical columns: {profile['categorical_columns']}
+- Datetime columns: {profile['datetime_columns']}
+- Total rows: {profile['rows']}
+- Data types: {profile['dtypes']}
+
+SAMPLE DATA:
 {sample}
 
-If user asks to perform a transformation, return:
-{{"type":"code", "content":"<python code using df, pd, np>", "explanation":"..."}}
+CAPABILITIES:
+1. Data transformations (filter, sort, group, aggregate)
+2. Statistical analysis (mean, median, sum, correlation)
+3. All visualization types: bar, pie, histogram, line, scatter, bubble, box, heatmap, treemap, sunburst, violin, strip, density
 
-If user asks to compute a numeric result, return:
-{{"type":"analysis", "content":"<python code that sets result=...>", "explanation":"..."}}
+RESPONSE FORMAT (JSON only):
+{{
+  "type": "code|analysis|plot|question|message",
+  "content": "<python code or message>",
+  "explanation": "<what you're doing>",
+  "visualization_type": "bar|pie|histogram|..." (for plots)
+}}
 
-If user asks to create a plot (bar/pie/line/scatter/histogram), return:
-{{"type":"plot", "content":"fig = px.bar(df, x='col', y='col', title='...')", "explanation":"..."}}
+PLOT EXAMPLES:
+- Bar: fig = px.bar(df, x='category', y='value', title='Title')
+- Pie: fig = px.pie(df, names='category', values='value')
+- Histogram: fig = px.histogram(df, x='column', nbins=20)
+- Line: fig = px.line(df, x='date', y='value')
+- Scatter: fig = px.scatter(df, x='col1', y='col2', color='category')
+- Bubble: fig = px.scatter(df, x='col1', y='col2', size='col3', color='category')
+- Box: fig = px.box(df, x='category', y='value')
+- Heatmap: fig = px.imshow(df.corr(), text_auto=True)
+- Treemap: fig = px.treemap(df, path=['category'], values='value')
+- Violin: fig = px.violin(df, x='category', y='value')
 
-If user asks a question you can't answer, return:
-{{"type":"question", "content":"What column should I use for X?"}}
+USER REQUEST: {message}
 
-Respond in JSON only.
-User: {message}
-"""
-    if not model:
-        low = message.lower()
-        if "sum" in low or "total" in low:
-            num_cols = [c for c in df.columns if np.issubdtype(df[c].dtype, np.number)]
-            if num_cols:
-                col = num_cols[0]
-                result = df[col].sum()
-                return jsonify({"type": "analysis", "success": True, "content": f"result = df['{col}'].sum()", "result": str(result)})
-            else:
-                return jsonify({"type": "message", "content": "No numeric columns found to sum."})
-        elif any(k in low for k in ["plot", "bar", "pie", "hist", "scatter", "visual"]):
-            # recommend a simple bar using first categorical vs numeric
-            cat_cols = [c for c in df.columns if not np.issubdtype(df[c].dtype, np.number)]
-            num_cols = [c for c in df.columns if np.issubdtype(df[c].dtype, np.number)]
-            if cat_cols and num_cols:
-                code = f"fig = px.bar(df.groupby('{cat_cols[0]}')[\"{num_cols[0]}\"].sum().reset_index(), x='{cat_cols[0]}', y='{num_cols[0]}', title='Total {num_cols[0]} by {cat_cols[0]}')"
-                # execute to generate figure json
-                try:
-                    local = {"df": df, "px": px, "pd": pd, "np": np}
-                    exec(code, {}, local)
-                    fig = local.get("fig")
-                    plot_json = fig.to_json()
-                    return jsonify({"type": "plot", "success": True, "plot": plot_json})
-                except Exception as e:
-                    return jsonify({"type": "message", "content": f"Plot failed: {e}"})
-            return jsonify({"type": "message", "content": "Not enough info to create plot."})
-        else:
-            return jsonify({"type": "message", "content": "AI model not configured. Use simple commands like 'sum sales' or 'plot sales by category'."})
+Respond with JSON only. Consider previous conversation context."""
 
-    # If model exists, call it
     try:
-        res = model.generate_content(system_prompt)
-        parsed = parse_json_response(res.text)
+        response_text = call_groq_api(system_prompt, conversation[:-1])  # Exclude the just-added user message
+        parsed = parse_json_response(response_text)
+        
+        # Add assistant response to conversation
+        conversation.append({
+            "role": "assistant", 
+            "content": parsed.get("explanation", parsed.get("content", ""))
+        })
+        
     except Exception as e:
+        # Fallback to basic operations if Groq fails
+        if not client:
+            return pd.handle_basic_operations(df, message, sessions[session_id])
         return jsonify({"error": f"AI call failed: {e}"}), 500
 
     rtype = parsed.get("type", "message")
     content = parsed.get("content", "")
     explanation = parsed.get("explanation", "")
 
-    # Execute code safely in a restricted namespace for allowed operations
     try:
         if rtype == "code":
             exec_globals = {"pd": pd, "np": np}
             exec_locals = {"df": df}
             exec(content, exec_globals, exec_locals)
-            # after execution, get df (may be mutated)
             new_df = exec_locals.get("df", df)
-            if not isinstance(new_df, pd.DataFrame):
-                # maybe user used in-place operations
-                new_df = df
-            sessions[session_id].append(new_df.copy())
+            sessions[session_id]["dataframes"].append(new_df.copy())
+            
             return jsonify({
-                "type": "code", 
-                "success": True, 
-                "content": content, 
-                "explanation": explanation, 
-                "preview": safe_to_records(new_df, limit=100, page=0), 
+                "type": "code",
+                "success": True,
+                "content": content,
+                "explanation": explanation,
+                "preview": safe_to_records(new_df, limit=100, page=0),
                 "profile": get_data_profile(new_df)
             })
 
@@ -438,11 +423,12 @@ User: {message}
             local_vars = {"df": df, "np": np, "pd": pd}
             exec(content, {}, local_vars)
             result = local_vars.get("result", None)
+            
             return jsonify({
-                "type": "analysis", 
-                "success": True, 
-                "content": content, 
-                "result": result, 
+                "type": "analysis",
+                "success": True,
+                "content": content,
+                "result": str(result),
                 "explanation": explanation
             })
 
@@ -450,69 +436,81 @@ User: {message}
             local_vars = {"df": df, "px": px, "go": go, "pd": pd, "np": np}
             exec(content, {}, local_vars)
             fig = local_vars.get("fig")
+            
             if fig:
                 plot_json = fig.to_json()
                 return jsonify({
-                    "type": "plot", 
-                    "success": True, 
-                    "plot": plot_json, 
-                    "explanation": explanation
+                    "type": "plot",
+                    "success": True,
+                    "plot": plot_json,
+                    "explanation": explanation,
+                    "visualization_type": parsed.get("visualization_type", "unknown")
                 })
             else:
-                return jsonify({"type": "message", "content": "No figure object produced."})
+                return jsonify({"type": "message", "content": "No figure generated"})
 
         elif rtype == "question":
             return jsonify({
-                "type": "question", 
-                "success": True, 
-                "content": parsed.get("content", "")
+                "type": "question",
+                "success": True,
+                "content": content
             })
 
         else:
-            return jsonify({"type": "message", "content": parsed.get("content", "")})
+            return jsonify({"type": "message", "content": content})
+            
     except Exception as e:
         return jsonify({
-            "type": rtype, 
-            "success": False, 
-            "error": str(e), 
+            "type": rtype,
+            "success": False,
+            "error": str(e),
             "content": content
         })
-
 
 @app.route("/api/undo", methods=["POST"])
 def undo():
     data = request.get_json() or {}
     session_id = data.get("session_id")
+    
     if not session_id or session_id not in sessions:
         return jsonify({"success": False, "error": "Invalid session"})
-    if len(sessions[session_id]) <= 1:
+    
+    if len(sessions[session_id]["dataframes"]) <= 1:
         return jsonify({"success": False, "error": "No undo available"})
-    sessions[session_id].pop()
-    df = sessions[session_id][-1]
+    
+    sessions[session_id]["dataframes"].pop()
+    df = sessions[session_id]["dataframes"][-1]
+    
     return jsonify({
-        "success": True, 
-        "preview": safe_to_records(df, limit=100, page=0), 
+        "success": True,
+        "preview": safe_to_records(df, limit=100, page=0),
         "profile": get_data_profile(df)
     })
-
 
 @app.route("/api/download", methods=["POST"])
 def download():
     data = request.get_json() or {}
     session_id = data.get("session_id")
+    
     if not session_id or session_id not in sessions:
         return jsonify({"error": "Invalid session"}), 400
-    df = sessions[session_id][-1]
+    
+    df = sessions[session_id]["dataframes"][-1]
     buffer = BytesIO()
     df.to_csv(buffer, index=False)
     buffer.seek(0)
-    return send_file(buffer, as_attachment=True, download_name="cleaned_data.csv", mimetype="text/csv")
+    
+    return send_file(
+        buffer,
+        as_attachment=True,
+        download_name="cleaned_data.csv",
+        mimetype="text/csv"
+    )
 
 if __name__ == "__main__":
-    print("🚀 Cleansera AI Backend running...")
-    print("🌐 Open http://localhost:5000")
-    print("📊 Features: Pagination, Server-side Search, AI-powered cleaning")
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-
-
-
+    print("Cleansera AI Backend v2.0 (Groq-Powered)")
+    print(f"Model: {GROQ_MODEL}")
+    print("Features: All visualizations, conversation memory, enhanced search")
+    print("Server: http://localhost:5000")
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
